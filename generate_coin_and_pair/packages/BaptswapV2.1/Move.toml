@@ -1,0 +1,59 @@
+[package]
+name = "BaptswapV2.1"
+# FoT hotfix, unstake hotfix, and added migrate to V2.1 smc
+version = "2.1.0"
+authors = []
+
+[addresses]
+# core V2
+baptswap_v2 = "0x5d1b1f3198e468b4f093a92fbd091209b0b045bcdd35ea6fbe82842e2a11740a"
+# core V2 hotfix
+baptswap_v2dot1 = "58e119832e253f9bba2192d916e1837234d4cf32dfc7dc55615c1195ac2447cd"
+dev_v2dot1 = "438f261f7d74f1b04d3558165b0c91df8caa623f5adb8e3dc6427f8c145fbbbb"
+# coin deployer
+bapt_framework = "d0ec361a55b327913690b2851cec05f1e017ec6c647689cae051644f667a1ddb"
+
+admin = "6dc7c3b14905bff00bd58cce4b140b86f2bf4814bd72e8c95caec370ed5fe41c"
+treasury = "6dc7c3b14905bff00bd58cce4b140b86f2bf4814bd72e8c95caec370ed5fe41c"
+
+alice = "0x123"
+bob = "0x456"
+
+# coins 
+other_coins = "0xf22bede237a07e121b56d91a491eb7bcdfd1f5907926a9e58338f964a01b17fa"
+other_coins_testnet = "0xec84c05cc40950c86d8a8bed19552f1e8ebb783196bb021c916161d22dc179f7"
+
+# Testnet Addresses
+layerzero = "0x1759cc0d3161f1eb79f65847d4feb9d1f74fb79014698a23b16b28b9cd4c37e3"
+layerzero_common = "0x1759cc0d3161f1eb79f65847d4feb9d1f74fb79014698a23b16b28b9cd4c37e3"
+msglib_auth = "0x1759cc0d3161f1eb79f65847d4feb9d1f74fb79014698a23b16b28b9cd4c37e3"
+msglib_v1_1 = "0x1759cc0d3161f1eb79f65847d4feb9d1f74fb79014698a23b16b28b9cd4c37e3"
+msglib_v2 = "0x1759cc0d3161f1eb79f65847d4feb9d1f74fb79014698a23b16b28b9cd4c37e3"
+zro = "0x1759cc0d3161f1eb79f65847d4feb9d1f74fb79014698a23b16b28b9cd4c37e3"
+executor_auth = "0x1759cc0d3161f1eb79f65847d4feb9d1f74fb79014698a23b16b28b9cd4c37e3"
+executor_v2 = "0x1759cc0d3161f1eb79f65847d4feb9d1f74fb79014698a23b16b28b9cd4c37e3"
+layerzero_apps = "0x2f972c173927006c83277b6e6ae38f83482eba560f343d022f145979020d3621"
+bridge = "0xec84c05cc40950c86d8a8bed19552f1e8ebb783196bb021c916161d22dc179f7"
+
+[dev-addresses]
+
+[dependencies.AptosFramework]
+git = "https://github.com/aptos-labs/aptos-core.git"
+rev = "mainnet"
+subdir = "aptos-move/framework/aptos-framework"
+
+[dependencies.bridge]
+git = "https://github.com/LayerZero-Labs/LayerZero-Aptos-Contract.git"
+rev = "main"
+subdir = "apps/bridge"
+
+[dependencies.BaptSwap]
+local = "../BaptSwap"
+
+[dependencies.BaptswapV2]
+local = "../BaptswapV2"
+
+[dependencies.CoinDeployer]
+local = "../CoinDeployer"
+
+[dev-dependencies]
