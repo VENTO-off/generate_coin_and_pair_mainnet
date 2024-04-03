@@ -6,7 +6,7 @@
     - TODOs:   
 */
 
-module bapt_framework_testnet::deployer_v2 {
+module bapt_framework_mainnet::deployer_v2 {
 
     use aptos_framework::coin::{Self, BurnCapability, FreezeCapability};
     use aptos_framework::aptos_coin::{AptosCoin as APT};
@@ -90,7 +90,7 @@ module bapt_framework_testnet::deployer_v2 {
 
     entry fun init(signer_ref: &signer, deploy_and_liquidate_fee: u64, deploy_and_initialize_fee_on_transfer_fee: u64) {
         let signer_addr = signer::address_of(signer_ref);
-        assert!(signer_addr == @bapt_framework_testnet, ENOT_BAPT_ACCOUNT);
+        assert!(signer_addr == @bapt_framework_mainnet, ENOT_BAPT_ACCOUNT);
         // init config
         move_to<Config>(
             signer_ref,
@@ -220,19 +220,19 @@ module bapt_framework_testnet::deployer_v2 {
     /// Get the current admin
     public fun admin(): address acquires Config {
         assert_config_initialized();
-        borrow_global<Config>(@bapt_framework_testnet).admin
+        borrow_global<Config>(@bapt_framework_mainnet).admin
     }
 
     #[view]
     /// Get the current fee for deploy and liquidate
     public fun deploy_and_liquidate_fee(): u64 acquires Config {
-        borrow_global<Config>(@bapt_framework_testnet).deploy_and_liquidate_fee
+        borrow_global<Config>(@bapt_framework_mainnet).deploy_and_liquidate_fee
     }
 
     #[view]
     /// Get the current fee for deploy and create pair
     public fun deploy_and_initialize_fee_on_transfer_fee(): u64 acquires Config {
-        borrow_global<Config>(@bapt_framework_testnet).deploy_and_initialize_fee_on_transfer_fee
+        borrow_global<Config>(@bapt_framework_mainnet).deploy_and_initialize_fee_on_transfer_fee
     }
 
     #[view]
@@ -279,7 +279,7 @@ module bapt_framework_testnet::deployer_v2 {
     public entry fun set_admin(signer_ref: &signer, new_admin: address) acquires Config {
         assert_config_initialized();
         let signer_addr = signer::address_of(signer_ref);
-        let config = borrow_global_mut<Config>(@bapt_framework_testnet);
+        let config = borrow_global_mut<Config>(@bapt_framework_mainnet);
         assert!(config.admin == signer_addr, ENOT_BAPT_ACCOUNT);
         // assert new_admin is not same as old admin
         let old_admin = config.admin;
@@ -293,7 +293,7 @@ module bapt_framework_testnet::deployer_v2 {
     public entry fun set_deploy_and_liquidate_fee(signer_ref: &signer, new_fee: u64) acquires Config {
         assert_config_initialized();
         let signer_addr = signer::address_of(signer_ref);
-        let config = borrow_global_mut<Config>(@bapt_framework_testnet);
+        let config = borrow_global_mut<Config>(@bapt_framework_mainnet);
         assert!(config.admin == signer_addr, ENOT_BAPT_ACCOUNT);
         // assert new_fee is not same as old fee
         let old_fee = config.deploy_and_liquidate_fee;
@@ -307,7 +307,7 @@ module bapt_framework_testnet::deployer_v2 {
     public entry fun set_deploy_and_initialize_fee_on_transfer_fee(signer_ref: &signer, new_fee: u64) acquires Config {
         assert_config_initialized();
         let signer_addr = signer::address_of(signer_ref);
-        let config = borrow_global_mut<Config>(@bapt_framework_testnet);
+        let config = borrow_global_mut<Config>(@bapt_framework_mainnet);
         assert!(config.admin == signer_addr, ENOT_BAPT_ACCOUNT);
         // assert new_fee is not same as old fee
         let old_fee = config.deploy_and_initialize_fee_on_transfer_fee;
@@ -322,7 +322,7 @@ module bapt_framework_testnet::deployer_v2 {
     // ----------------
 
     inline fun assert_config_initialized() {
-        assert!(exists<Config>(@bapt_framework_testnet), EDEPLOYER_NOT_INITIALIZED);
+        assert!(exists<Config>(@bapt_framework_mainnet), EDEPLOYER_NOT_INITIALIZED);
     }
 
     inline fun generate_coin<CoinType>(
@@ -375,13 +375,13 @@ module bapt_framework_testnet::deployer_v2 {
     }
     
     inline fun collect_deploy_and_liquidate_fee(deployer: &signer) acquires Config {
-        let fee = borrow_global<Config>(@bapt_framework_testnet).deploy_and_liquidate_fee;
-        coin::transfer<APT>(deployer, @bapt_framework_testnet, fee);
+        let fee = borrow_global<Config>(@bapt_framework_mainnet).deploy_and_liquidate_fee;
+        coin::transfer<APT>(deployer, @bapt_framework_mainnet, fee);
     }
 
     inline fun collect_deploy_and_initialize_fee_on_transfer_fee(deployer: &signer) acquires Config {
-        let fee = borrow_global<Config>(@bapt_framework_testnet).deploy_and_initialize_fee_on_transfer_fee;
-        coin::transfer<APT>(deployer, @bapt_framework_testnet, fee);
+        let fee = borrow_global<Config>(@bapt_framework_mainnet).deploy_and_initialize_fee_on_transfer_fee;
+        coin::transfer<APT>(deployer, @bapt_framework_mainnet, fee);
     }
 
     // returns the burn cap for a coin

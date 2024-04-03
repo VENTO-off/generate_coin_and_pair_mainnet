@@ -5,7 +5,6 @@ authors = []
 
 [addresses]
 coin_owner = "0x0db874150991dce3beefd5ec2a8323a192de410846e362c0375a185a561104bf"
-bapt_framework_mainnet = "0xa55a7122aa085e4bf34b755675fb900c40ee92f60c068255609ecea8ef4123f3"
 
 [dev-addresses]
 

@@ -18,6 +18,10 @@ module baptswap::router {
     const E_INSUFFICIENT_Y_AMOUNT: u64 = 3;
     /// Pair is not created
     const E_PAIR_NOT_CREATED: u64 = 4;
+    // Pool already created
+    const E_POOL_EXISTS: u64 = 5;
+    // Pool not created
+    const E_POOL_NOT_CREATED: u64 = 6;
 
     /// Create a Pair from 2 Coins
     /// Should revert if the pair is already created
@@ -31,14 +35,61 @@ module baptswap::router {
         }
     }
 
-    public entry fun deploy_coin(
+    public entry fun create_rewards_pool<X, Y>(
         sender: &signer,
-        name: vector<u8>,
-        symbol: vector<u8>
+        is_x_staked: bool
     ) {
-        swap::deploy_coin(sender, name, symbol);
+        assert!(((swap::is_pair_created<X, Y>() || swap::is_pair_created<Y, X>())), E_PAIR_NOT_CREATED);
+        assert!(!((swap::is_pool_created<X, Y>() || swap::is_pool_created<Y, X>())), E_POOL_EXISTS);
+
+        if (swap_utils::sort_token_type<X, Y>()) {
+            swap::init_rewards_pool<X, Y>(sender, is_x_staked);
+        } else {
+            swap::init_rewards_pool<Y, X>(sender, !is_x_staked);
+        }
     }
 
+    public entry fun stake_tokens_in_pool<X, Y>(
+        sender: &signer,
+        amount: u64
+    ) {
+        assert!(((swap::is_pair_created<X, Y>() || swap::is_pair_created<Y, X>())), E_PAIR_NOT_CREATED);
+        assert!(((swap::is_pool_created<X, Y>() || swap::is_pool_created<Y, X>())), E_POOL_NOT_CREATED);
+
+        if (swap_utils::sort_token_type<X, Y>()) {
+            swap::stake_tokens<X, Y>(sender, amount);
+        } else {
+            swap::stake_tokens<Y, X>(sender, amount);
+        }
+    }
+
+
+    public entry fun withdraw_tokens_from_pool<X, Y>(
+        sender: &signer,
+        amount: u64
+    ) {
+        assert!(((swap::is_pair_created<X, Y>() || swap::is_pair_created<Y, X>())), E_PAIR_NOT_CREATED);
+        assert!(((swap::is_pool_created<X, Y>() || swap::is_pool_created<Y, X>())), E_POOL_NOT_CREATED);
+
+        if (swap_utils::sort_token_type<X, Y>()) {
+            swap::withdraw_tokens<X, Y>(sender, amount);
+        } else {
+            swap::withdraw_tokens<Y, X>(sender, amount);
+        }
+    }
+
+    public entry fun claim_rewards_from_pool<X, Y>(
+        sender: &signer
+    ) {
+        assert!(((swap::is_pair_created<X, Y>() || swap::is_pair_created<Y, X>())), E_PAIR_NOT_CREATED);
+        assert!(((swap::is_pool_created<X, Y>() || swap::is_pool_created<Y, X>())), E_POOL_NOT_CREATED);
+
+        if (swap_utils::sort_token_type<X, Y>()) {
+            swap::claim_rewards<X, Y>(sender);
+        } else {
+            swap::claim_rewards<Y, X>(sender);
+        }
+    }
 
     /// Add Liquidity, create pair if it's needed
     public entry fun add_liquidity<X, Y>(

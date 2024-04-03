@@ -4,7 +4,7 @@ version = "1.0.0"
 authors = []
 
 [addresses]
-bapt_framework_testnet = "5926ff3e8978fbd84babc7828e60cdc09ac3d5fc0c13711c3ef2c2e397adb2b0"
+bapt_framework_mainnet = "0xa55a7122aa085e4bf34b755675fb900c40ee92f60c068255609ecea8ef4123f3"
 bapt_framework = "0xd0ec361a55b327913690b2851cec05f1e017ec6c647689cae051644f667a1ddb" 
 
 [dev-addresses]

@@ -163,7 +163,7 @@ module bapt_framework::deployer {
         // aptos_framework::account::create_account_for_test(signer::address_of(user));
         init(&bapt_framework, 1, signer::address_of(&bapt_framework));
         // register aptos coin and mint some APT to be able to pay for the fee of generate_coin
-        managed_coin::register<AptosCoin>(&bapt_framework);
+        coin::register<AptosCoin>(&bapt_framework);
         let (aptos_coin_burn_cap, aptos_coin_mint_cap) = aptos_coin::initialize_for_test(&aptos_framework);
         // mint some APT to be able to pay for the fee of generate_coin
         aptos_coin::mint(&aptos_framework, signer::address_of(&bapt_framework), 1000);

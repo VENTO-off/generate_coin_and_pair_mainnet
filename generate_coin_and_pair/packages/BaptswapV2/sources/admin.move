@@ -458,8 +458,8 @@ module baptswap_v2::admin {
         if (total_fees_numerator <= constants::get_fee_threshold_numerator()) true else false
     }
 
-    #[test_only]
-    friend baptswap_v2::swap_v2_test;
+    // #[test_only]
+    // friend baptswap_v2::swap_v2_test;
 
     #[test_only]
     public fun init_test(sender: &signer) {

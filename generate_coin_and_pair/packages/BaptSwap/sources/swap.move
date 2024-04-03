@@ -46,6 +46,13 @@ module baptswap::swap {
     const ERROR_NOT_RESOURCE_ACCOUNT: u64 = 20;
     const ERROR_NO_FEE_WITHDRAW: u64 = 21;
     const ERROR_EXCESSIVE_FEE: u64 = 22;
+    const ERROR_PAIR_NOT_CREATED: u64 = 23;
+    const ERROR_MUST_BE_INFERIOR_TO_TWENTY: u64 = 24;
+    const ERROR_POOL_NOT_CREATED: u64 = 25;
+    const ERROR_NO_STAKE: u64 = 26;
+    const ERROR_INSUFFICIENT_BALANCE: u64 = 27;
+    const ERROR_NO_REWARDS: u64 = 28;
+    const ERROR_NOT_OWNER: u64 = 29;
 
     const PRECISION: u64 = 10000;
 
@@ -54,15 +61,15 @@ module baptswap::swap {
 
     const BASE_LIQUIDITY_FEE: u128 = 20;
 
-    struct BaptSwapCoin {}
-
     /// The LP Token type
     struct LPToken<phantom X, phantom Y> has key {}
 
     /// Stores the metadata required for the token pairs
     struct TokenPairMetadata<phantom X, phantom Y> has key {
-        /// The admin of the token pair
+        /// The first provider of the token pair
         creator: address,
+        /// The admin of the token pair
+        owner: address,
         /// It's reserve_x * reserve_y, as of immediately after the most recent liquidity event
         k_last: u128,
         /// The variable liquidity fee granted to providers
@@ -102,8 +109,19 @@ module baptswap::swap {
 
     /// Stores the rewards pool info for token pairs
     struct TokenPairRewardsPool<phantom X, phantom Y> has key {
-        pool_balance_x: coin::Coin<X>,
-        pool_balance_y: coin::Coin<Y>,
+        staked_tokens: u64,
+        balance_x: coin::Coin<X>,
+        balance_y: coin::Coin<Y>,
+        magnified_dividends_per_share_x: u128,
+        magnified_dividends_per_share_y: u128,
+        precision_factor: u128,
+        is_x_staked: bool,
+    }
+
+    struct RewardsPoolUserInfo<phantom X, phantom Y, phantom StakeToken> has key, store {
+        staked_tokens: coin::Coin<StakeToken>,
+        reward_debt_x: u128,
+        reward_debt_y: u128,
     }
 
     struct SwapInfo has key {
@@ -177,30 +195,370 @@ module baptswap::swap {
         });
     }
 
-    public(friend) fun deploy_coin(
+    public(friend) fun init_rewards_pool<X, Y>(
         sender: &signer,
-        name: vector<u8>,
-        symbol: vector<u8>
-    ) {
-        // let sender_addr = signer::address_of(sender);
-        // let swap_info = borrow_global_mut<SwapInfo>(RESOURCE_ACCOUNT);
-        // let resource_signer = account::create_signer_with_capability(&swap_info.signer_cap);
+        is_x_staked: bool
+    ) acquires SwapInfo, TokenPairMetadata {
+        assert!(is_pair_created<X, Y>(), ERROR_PAIR_NOT_CREATED);
+        assert!(!exists<TokenPairRewardsPool<X, Y>>(RESOURCE_ACCOUNT), ERROR_ALREADY_INITIALIZED);
 
-        let (_resource, resource_cap) = account::create_resource_account(sender, b"test");
-        let resource_signer_from_cap = account::create_signer_with_capability(&resource_cap);
+        let sender_addr = signer::address_of(sender);
 
-        // now we init the LP token
-        let (burn_cap, freeze_cap, mint_cap) = coin::initialize<BaptSwapCoin>(
-            &resource_signer_from_cap,
-            string::utf8(name),
-            string::utf8(symbol),
-            8,
-            true
+        // Check the initializer is the owner of the traded pair
+        let metadata = borrow_global_mut<TokenPairMetadata<X, Y>>(RESOURCE_ACCOUNT);
+        assert!(sender_addr == metadata.owner, ERROR_NOT_OWNER);
+
+        // Create the pool resource
+        let swap_info = borrow_global_mut<SwapInfo>(RESOURCE_ACCOUNT);
+        let resource_signer = account::create_signer_with_capability(&swap_info.signer_cap);
+
+        let precision_factor = math::pow(10u128, 12u8);
+
+        move_to<TokenPairRewardsPool<X, Y>>(
+            &resource_signer,
+            TokenPairRewardsPool {
+                staked_tokens: 0,
+                balance_x: coin::zero<X>(),
+                balance_y: coin::zero<Y>(),
+                magnified_dividends_per_share_x: 0,
+                magnified_dividends_per_share_y: 0,
+                precision_factor,
+                is_x_staked
+            }
+        );
+    }
+
+    // Calculate and adjust the maginified dividends per share
+    fun update_pool<X, Y>(pool_info: &mut TokenPairRewardsPool<X, Y>, reward_x: u64, reward_y: u64) {
+        if (pool_info.staked_tokens == 0) {
+            return
+        };
+
+        let (new_x_magnified_dividends_per_share, new_y_magnified_dividends_per_share) = cal_acc_token_per_share(
+            pool_info.magnified_dividends_per_share_x,
+            pool_info.magnified_dividends_per_share_y,
+            pool_info.staked_tokens,
+            pool_info.precision_factor,
+            reward_x,
+            reward_y
         );
 
-        coin::destroy_mint_cap(mint_cap);
-        coin::destroy_freeze_cap(freeze_cap);
-        coin::destroy_burn_cap(burn_cap);
+        // Update magnitude values
+        pool_info.magnified_dividends_per_share_x = new_x_magnified_dividends_per_share;
+        pool_info.magnified_dividends_per_share_y = new_y_magnified_dividends_per_share;
+    }
+
+    fun cal_acc_token_per_share(
+        last_magnified_dividends_per_share_x: u128,
+        last_magnified_dividends_per_share_y: u128,
+        total_staked_token: u64, 
+        precision_factor: u128, 
+        reward_x: u64, 
+        reward_y: u64
+    ): (u128, u128) {
+        if (reward_x == 0 && reward_y == 0) return (last_magnified_dividends_per_share_x, last_magnified_dividends_per_share_y);
+
+        let x_token_per_share_u256 = u256::from_u64(0u64);
+        let y_token_per_share_u256 = u256::from_u64(0u64);
+
+        if (reward_x > 0) {
+            // acc_token_per_share = acc_token_per_share + (reward * precision_factor) / total_stake;
+            x_token_per_share_u256 = u256::add(
+                u256::from_u128(last_magnified_dividends_per_share_x),
+                u256::div(
+                    u256::mul(u256::from_u64(reward_x), u256::from_u128(precision_factor)),
+                    u256::from_u64(total_staked_token)
+                )
+            );
+        } else {
+            x_token_per_share_u256 = u256::from_u128(last_magnified_dividends_per_share_x);
+        };
+
+        if (reward_y > 0) {
+            // acc_token_per_share = acc_token_per_share + (reward * precision_factor) / total_stake;
+            y_token_per_share_u256 = u256::add(
+                u256::from_u128(last_magnified_dividends_per_share_y),
+                u256::div(
+                    u256::mul(u256::from_u64(reward_y), u256::from_u128(precision_factor)),
+                    u256::from_u64(total_staked_token)
+                )
+            );
+        } else {
+            y_token_per_share_u256 = u256::from_u128(last_magnified_dividends_per_share_y);
+        };
+
+        (u256::as_u128(x_token_per_share_u256), u256::as_u128(y_token_per_share_u256))
+    }
+
+    fun reward_debt(amount: u64, acc_token_per_share: u128, precision_factor: u128): u128 {
+        // user.reward_debt = (user_info.amount * pool_info.acc_token_per_share) / pool_info.precision_factor;
+        u256::as_u128(
+            u256::div(
+                u256::mul(
+                    u256::from_u64(amount),
+                    u256::from_u128(acc_token_per_share)
+                ),
+                u256::from_u128(precision_factor)
+            )
+        )
+    }
+
+    fun cal_pending_reward(amount: u64, reward_debt: u128, acc_token_per_share: u128, precision_factor: u128): u64 {
+        // pending = (user_info::amount * pool_info.acc_token_per_share) / pool_info.precision_factor - user_info.reward_debt
+        u256::as_u64(
+            u256::sub(
+                u256::div(
+                    u256::mul(
+                        u256::from_u64(amount),
+                        u256::from_u128(acc_token_per_share)
+                    ), u256::from_u128(precision_factor)
+                ), u256::from_u128(reward_debt))
+        )
+    }
+
+    public entry fun stake_tokens<X, Y>(
+        sender: &signer,
+        amount: u64
+    ) acquires TokenPairRewardsPool, RewardsPoolUserInfo {
+        let account_address = signer::address_of(sender);
+
+        assert!(exists<TokenPairRewardsPool<X, Y>>(RESOURCE_ACCOUNT), ERROR_POOL_NOT_CREATED);
+        let pool_info = borrow_global_mut<TokenPairRewardsPool<X, Y>>(RESOURCE_ACCOUNT);
+
+        if (pool_info.is_x_staked) {
+            if (!exists<RewardsPoolUserInfo<X, Y, X>>(account_address)) {
+                move_to(sender, RewardsPoolUserInfo<X, Y, X> {
+                    staked_tokens: coin::zero<X>(),
+                    reward_debt_x: 0,
+                    reward_debt_y: 0,
+                })
+            };
+
+            let user_info = borrow_global_mut<RewardsPoolUserInfo<X, Y, X>>(account_address);
+
+            if (coin::value(&mut user_info.staked_tokens) > 0) {
+                // Calculate pending rewards
+                let pending_reward_x = cal_pending_reward(coin::value(&user_info.staked_tokens), user_info.reward_debt_x, pool_info.magnified_dividends_per_share_x, pool_info.precision_factor);
+                let pending_reward_y = cal_pending_reward(coin::value(&user_info.staked_tokens), user_info.reward_debt_y, pool_info.magnified_dividends_per_share_y, pool_info.precision_factor);
+                
+                if (pending_reward_x > 0) {
+                    // Check/register x and extract from pool
+                    check_or_register_coin_store<X>(sender);
+                    let x_out = coin::extract<X>(&mut pool_info.balance_x, pending_reward_x);
+                    coin::deposit(signer::address_of(sender), x_out);
+                };
+
+                if (pending_reward_y > 0) {
+                    // Check/register y and extract from pool
+                    check_or_register_coin_store<Y>(sender);
+                    let y_out = coin::extract<Y>(&mut pool_info.balance_y, pending_reward_y);
+                    coin::deposit(signer::address_of(sender), y_out);
+                };
+            };
+
+            if (amount > 0) {
+                transfer_in<X>(&mut user_info.staked_tokens, sender, amount);
+                pool_info.staked_tokens = pool_info.staked_tokens + amount;
+            };
+
+            //Calculate and update user corrections
+            user_info.reward_debt_x = reward_debt(coin::value(&user_info.staked_tokens), pool_info.magnified_dividends_per_share_x, pool_info.precision_factor);
+            user_info.reward_debt_y = reward_debt(coin::value(&user_info.staked_tokens), pool_info.magnified_dividends_per_share_y, pool_info.precision_factor);
+
+        } else {
+            if (!exists<RewardsPoolUserInfo<X, Y, Y>>(account_address)) {
+                move_to(sender, RewardsPoolUserInfo<X, Y, Y> {
+                    staked_tokens: coin::zero<Y>(),
+                    reward_debt_x: 0,
+                    reward_debt_y: 0,
+                })
+            };
+
+            let user_info = borrow_global_mut<RewardsPoolUserInfo<X, Y, Y>>(account_address);
+
+            if (coin::value(&mut user_info.staked_tokens) > 0) {
+                // Calculate pending rewards
+                let pending_reward_x = cal_pending_reward(coin::value(&user_info.staked_tokens), user_info.reward_debt_x, pool_info.magnified_dividends_per_share_x, pool_info.precision_factor);
+                let pending_reward_y = cal_pending_reward(coin::value(&user_info.staked_tokens), user_info.reward_debt_y, pool_info.magnified_dividends_per_share_y, pool_info.precision_factor);
+                
+                if (pending_reward_x > 0) {
+                    // Check/register x and extract from pool
+                    check_or_register_coin_store<X>(sender);
+                    let x_out = coin::extract<X>(&mut pool_info.balance_x, pending_reward_x);
+                    coin::deposit(signer::address_of(sender), x_out);
+                };
+
+                if (pending_reward_y > 0) {
+                    // Check/register y and extract from pool
+                    check_or_register_coin_store<Y>(sender);
+                    let y_out = coin::extract<Y>(&mut pool_info.balance_y, pending_reward_y);
+                    coin::deposit(signer::address_of(sender), y_out);
+                };
+            };
+
+            if (amount > 0) {
+                transfer_in<Y>(&mut user_info.staked_tokens, sender, amount);
+                pool_info.staked_tokens = pool_info.staked_tokens + amount;
+            };
+
+            // Calculate and update user corrections
+            user_info.reward_debt_x = reward_debt(coin::value(&user_info.staked_tokens), pool_info.magnified_dividends_per_share_x, pool_info.precision_factor);
+            user_info.reward_debt_y = reward_debt(coin::value(&user_info.staked_tokens), pool_info.magnified_dividends_per_share_y, pool_info.precision_factor);
+
+        };
+    }
+
+    public entry fun withdraw_tokens<X, Y>(
+        sender: &signer,
+        amount: u64
+    ) acquires TokenPairRewardsPool, RewardsPoolUserInfo {
+        let account_address = signer::address_of(sender);
+
+        assert!(exists<TokenPairRewardsPool<X, Y>>(RESOURCE_ACCOUNT), ERROR_POOL_NOT_CREATED);
+        let pool_info = borrow_global_mut<TokenPairRewardsPool<X, Y>>(RESOURCE_ACCOUNT);
+
+        if (pool_info.is_x_staked) {
+            assert!(exists<RewardsPoolUserInfo<X, Y, X>>(account_address), ERROR_NO_STAKE);
+            let user_info = borrow_global_mut<RewardsPoolUserInfo<X, Y, X>>(account_address);
+            assert!(coin::value<X>(&mut user_info.staked_tokens) >= amount, ERROR_INSUFFICIENT_BALANCE);
+
+            // Calculate pending rewards
+            let pending_reward_x = cal_pending_reward(coin::value(&user_info.staked_tokens), user_info.reward_debt_x, pool_info.magnified_dividends_per_share_x, pool_info.precision_factor);
+            let pending_reward_y = cal_pending_reward(coin::value(&user_info.staked_tokens), user_info.reward_debt_y, pool_info.magnified_dividends_per_share_y, pool_info.precision_factor);
+            
+            if (pending_reward_x > 0) {
+                // Check/register x and extract from pool
+                check_or_register_coin_store<X>(sender);
+                let x_out = coin::extract<X>(&mut pool_info.balance_x, pending_reward_x);
+                coin::deposit(signer::address_of(sender), x_out);
+            };
+
+            if (pending_reward_y > 0) {
+                // Check/register y and extract from pool
+                check_or_register_coin_store<Y>(sender);
+                let y_out = coin::extract<Y>(&mut pool_info.balance_y, pending_reward_y);
+                coin::deposit(signer::address_of(sender), y_out);
+            };
+
+            // Tranfer staked tokens out
+            if (amount > 0) {
+                transfer_out<X>(&mut user_info.staked_tokens, sender, amount);
+                pool_info.staked_tokens = pool_info.staked_tokens - amount;
+            };
+
+            //Calculate and update user corrections
+            user_info.reward_debt_x = reward_debt(coin::value(&user_info.staked_tokens), pool_info.magnified_dividends_per_share_x, pool_info.precision_factor);
+            user_info.reward_debt_y = reward_debt(coin::value(&user_info.staked_tokens), pool_info.magnified_dividends_per_share_y, pool_info.precision_factor);
+
+
+        } else {
+            assert!(exists<RewardsPoolUserInfo<X, Y, Y>>(account_address), ERROR_NO_STAKE);
+            let user_info = borrow_global_mut<RewardsPoolUserInfo<X, Y, Y>>(account_address);
+            assert!(coin::value<Y>(&mut user_info.staked_tokens) >= amount, ERROR_INSUFFICIENT_BALANCE);
+
+            // Calculate pending rewards
+            let pending_reward_x = cal_pending_reward(coin::value(&user_info.staked_tokens), user_info.reward_debt_x, pool_info.magnified_dividends_per_share_x, pool_info.precision_factor);
+            let pending_reward_y = cal_pending_reward(coin::value(&user_info.staked_tokens), user_info.reward_debt_y, pool_info.magnified_dividends_per_share_y, pool_info.precision_factor);
+            
+            if (pending_reward_x > 0) {
+                // Check/register x and extract from pool
+                check_or_register_coin_store<X>(sender);
+                let x_out = coin::extract<X>(&mut pool_info.balance_x, pending_reward_x);
+                coin::deposit(signer::address_of(sender), x_out);
+            };
+
+            if (pending_reward_y > 0) {
+                // Check/register y and extract from pool
+                check_or_register_coin_store<Y>(sender);
+                let y_out = coin::extract<Y>(&mut pool_info.balance_y, pending_reward_y);
+                coin::deposit(signer::address_of(sender), y_out);
+            };
+
+            // Tranfer staked tokens out
+            if (amount > 0) {
+                transfer_out<Y>(&mut user_info.staked_tokens, sender, amount);
+                pool_info.staked_tokens = pool_info.staked_tokens - amount;
+            };
+
+            //Calculate and update user corrections
+            user_info.reward_debt_x = reward_debt(coin::value(&user_info.staked_tokens), pool_info.magnified_dividends_per_share_x, pool_info.precision_factor);
+            user_info.reward_debt_y = reward_debt(coin::value(&user_info.staked_tokens), pool_info.magnified_dividends_per_share_y, pool_info.precision_factor);
+        }
+    }
+
+    public entry fun claim_rewards<X, Y>(
+        sender: &signer
+    ) acquires TokenPairRewardsPool, RewardsPoolUserInfo {
+        let account_address = signer::address_of(sender);
+
+        assert!(exists<TokenPairRewardsPool<X, Y>>(RESOURCE_ACCOUNT), ERROR_POOL_NOT_CREATED);
+        let pool_info = borrow_global_mut<TokenPairRewardsPool<X, Y>>(RESOURCE_ACCOUNT);
+
+        if (pool_info.is_x_staked) {
+            assert!(exists<RewardsPoolUserInfo<X, Y, X>>(account_address), ERROR_NO_STAKE);
+            let user_info = borrow_global_mut<RewardsPoolUserInfo<X, Y, X>>(account_address);
+
+            // Calculate pending rewards
+            let pending_reward_x = cal_pending_reward(coin::value(&user_info.staked_tokens), user_info.reward_debt_x, pool_info.magnified_dividends_per_share_x, pool_info.precision_factor);
+            let pending_reward_y = cal_pending_reward(coin::value(&user_info.staked_tokens), user_info.reward_debt_y, pool_info.magnified_dividends_per_share_y, pool_info.precision_factor);
+            
+            if (pending_reward_x > 0) {
+                // Check/register x and extract from pool
+                check_or_register_coin_store<X>(sender);
+                let x_out = coin::extract<X>(&mut pool_info.balance_x, pending_reward_x);
+                coin::deposit(signer::address_of(sender), x_out);
+            };
+
+            if (pending_reward_y > 0) {
+                // Check/register y and extract from pool
+                check_or_register_coin_store<Y>(sender);
+                let y_out = coin::extract<Y>(&mut pool_info.balance_y, pending_reward_y);
+                coin::deposit(signer::address_of(sender), y_out);
+            };
+
+            //Calculate and update user corrections
+            user_info.reward_debt_x = reward_debt(coin::value(&user_info.staked_tokens), pool_info.magnified_dividends_per_share_x, pool_info.precision_factor);
+            user_info.reward_debt_y = reward_debt(coin::value(&user_info.staked_tokens), pool_info.magnified_dividends_per_share_y, pool_info.precision_factor);
+ 
+        } else {
+            assert!(exists<RewardsPoolUserInfo<X, Y, Y>>(account_address), ERROR_NO_STAKE);
+            let user_info = borrow_global_mut<RewardsPoolUserInfo<X, Y, Y>>(account_address);
+
+            // Calculate pending rewards
+            let pending_reward_x = cal_pending_reward(coin::value(&user_info.staked_tokens), user_info.reward_debt_x, pool_info.magnified_dividends_per_share_x, pool_info.precision_factor);
+            let pending_reward_y = cal_pending_reward(coin::value(&user_info.staked_tokens), user_info.reward_debt_y, pool_info.magnified_dividends_per_share_y, pool_info.precision_factor);
+            
+            if (pending_reward_x > 0) {
+                // Check/register x and extract from pool
+                check_or_register_coin_store<X>(sender);
+                let x_out = coin::extract<X>(&mut pool_info.balance_x, pending_reward_x);
+                coin::deposit(signer::address_of(sender), x_out);
+            };
+
+            if (pending_reward_y > 0) {
+                // Check/register y and extract from pool
+                check_or_register_coin_store<Y>(sender);
+                let y_out = coin::extract<Y>(&mut pool_info.balance_y, pending_reward_y);
+                coin::deposit(signer::address_of(sender), y_out);
+            };
+
+            //Calculate and update user corrections
+            user_info.reward_debt_x = reward_debt(coin::value(&user_info.staked_tokens), pool_info.magnified_dividends_per_share_x, pool_info.precision_factor);
+            user_info.reward_debt_y = reward_debt(coin::value(&user_info.staked_tokens), pool_info.magnified_dividends_per_share_y, pool_info.precision_factor);
+ 
+        };
+
+   }
+
+    fun transfer_in<CoinType>(own_coin: &mut coin::Coin<CoinType>, account: &signer, amount: u64) {
+        let coin = coin::withdraw<CoinType>(account, amount);
+        coin::merge(own_coin, coin);
+    }
+
+    fun transfer_out<CoinType>(own_coin: &mut coin::Coin<CoinType>, receiver: &signer, amount: u64) {
+        check_or_register_coin_store<CoinType>(receiver);
+        let extract_coin = coin::extract<CoinType>(own_coin, amount);
+        coin::deposit<CoinType>(signer::address_of(receiver), extract_coin);
     }
 
     /// Create the specified coin pair
@@ -246,6 +604,7 @@ module baptswap::swap {
             &resource_signer,
             TokenPairMetadata {
                 creator: sender_addr,
+                owner: ZERO_ACCOUNT,
                 k_last: 0,
                 liquidity_fee: 0,
                 treasury_fee: 10,
@@ -260,14 +619,6 @@ module baptswap::swap {
                 mint_cap,
                 burn_cap,
                 freeze_cap,
-            }
-        );
-
-        move_to<TokenPairRewardsPool<X, Y>>(
-            &resource_signer,
-            TokenPairRewardsPool {
-                pool_balance_x: coin::zero<X>(),
-                pool_balance_y: coin::zero<Y>(),
             }
         );
 
@@ -307,6 +658,10 @@ module baptswap::swap {
         exists<TokenPairReserve<X, Y>>(RESOURCE_ACCOUNT)
     }
 
+    public fun is_pool_created<X, Y>(): bool {
+        exists<TokenPairRewardsPool<X, Y>>(RESOURCE_ACCOUNT)
+    }
+
     /// Obtain the LP token balance of `addr`.
     /// This method can only be used to check other users' balance.
     public fun lp_balance<X, Y>(addr: address): u64 {
@@ -332,12 +687,32 @@ module baptswap::swap {
     // Get current accumulated fees for a token pair
     public fun token_fees_accumulated<X, Y>(): (u64, u64, u64, u64, u64, u64) acquires TokenPairMetadata, TokenPairRewardsPool {
         let metadata = borrow_global_mut<TokenPairMetadata<X, Y>>(RESOURCE_ACCOUNT);
+
+        let treasury_balance_x = coin::value<X>(&metadata.treasury_balance_x);
+        let treasury_balance_y = coin::value<Y>(&metadata.treasury_balance_y);
+        let team_balance_x = coin::value<X>(&metadata.team_balance_x);
+        let team_balance_y = coin::value<Y>(&metadata.team_balance_y);
+        let pool_balance_x = 0;
+        let pool_balance_y = 0;
+
+        if (is_pool_created<X, Y>()) {
+            let pool = borrow_global_mut<TokenPairRewardsPool<X, Y>>(RESOURCE_ACCOUNT);
+
+            pool_balance_x = coin::value<X>(&pool.balance_x);
+            pool_balance_y = coin::value<Y>(&pool.balance_y);
+        };
+
+        (treasury_balance_x, treasury_balance_y, team_balance_x, team_balance_y, pool_balance_x, pool_balance_y)
+    }
+
+    public fun token_rewards_pool_info<X, Y>(): (u64, u64, u64, u128, u128, u128, bool) acquires TokenPairRewardsPool {
+        assert!(is_pool_created<X, Y>(), ERROR_POOL_NOT_CREATED);
+
         let pool = borrow_global_mut<TokenPairRewardsPool<X, Y>>(RESOURCE_ACCOUNT);
-        (
-            coin::value<X>(&metadata.treasury_balance_x), coin::value<Y>(&metadata.treasury_balance_y),
-            coin::value<X>(&metadata.team_balance_x), coin::value<Y>(&metadata.team_balance_y),
-            coin::value<X>(&pool.pool_balance_x), coin::value<Y>(&pool.pool_balance_y),
-        )
+
+        (pool.staked_tokens, coin::value(&pool.balance_x), coin::value(&pool.balance_y),
+         pool.magnified_dividends_per_share_x, pool.magnified_dividends_per_share_y,
+         pool.precision_factor, pool.is_x_staked)
     }
 
     /// Get the current reserves of T0 and T1 with the latest updated timestamp
@@ -571,9 +946,14 @@ module baptswap::swap {
         coin::merge(&mut metadata.team_balance_x, team_coins);
 
         // Extract rewards fee <X> to pool
-        let rewards_pool = borrow_global_mut<TokenPairRewardsPool<X, Y>>(RESOURCE_ACCOUNT);
-        let rewards_coins = coin::extract(&mut metadata.balance_x, (amount_to_rewards as u64));
-        coin::merge(&mut rewards_pool.pool_balance_x, rewards_coins);
+        if (metadata.rewards_fee > 0) {
+            let rewards_pool = borrow_global_mut<TokenPairRewardsPool<X, Y>>(RESOURCE_ACCOUNT);
+            let rewards_coins = coin::extract(&mut metadata.balance_x, (amount_to_rewards as u64));
+
+            update_pool<X,Y>(rewards_pool, coin::value(&rewards_coins), 0);
+
+            coin::merge(&mut rewards_pool.balance_x, rewards_coins);
+        };
 
         // Update reserves
         let reserves = borrow_global_mut<TokenPairReserve<X, Y>>(RESOURCE_ACCOUNT);
@@ -624,18 +1004,23 @@ module baptswap::swap {
         // Grab token pair metadata
         let metadata = borrow_global_mut<TokenPairMetadata<X, Y>>(RESOURCE_ACCOUNT);
 
-        // Extract treasury fee <Y>
+        // Extract treasury fee <X>
         let treasury_coins = coin::extract(&mut metadata.balance_x, (amount_to_treasury as u64));
         coin::merge(&mut metadata.treasury_balance_x, treasury_coins);
 
-        // Extract team fee <Y>
+        // Extract team fee <X>
         let team_coins = coin::extract(&mut metadata.balance_x, (amount_to_team as u64));
         coin::merge(&mut metadata.team_balance_x, team_coins);
 
-        // Extract rewards fee <Y> to pool
-        let rewards_pool = borrow_global_mut<TokenPairRewardsPool<X, Y>>(RESOURCE_ACCOUNT);
-        let rewards_coins = coin::extract(&mut metadata.balance_x, (amount_to_rewards as u64));
-        coin::merge(&mut rewards_pool.pool_balance_x, rewards_coins);
+        // Extract rewards fee <X> to pool
+        if (metadata.rewards_fee > 0) {
+            let rewards_pool = borrow_global_mut<TokenPairRewardsPool<X, Y>>(RESOURCE_ACCOUNT);
+            let rewards_coins = coin::extract(&mut metadata.balance_x, (amount_to_rewards as u64));
+
+            update_pool<X,Y>(rewards_pool, coin::value(&rewards_coins), 0);
+
+            coin::merge(&mut rewards_pool.balance_x, rewards_coins);
+        };
 
         // Update reserves
         let reserves = borrow_global_mut<TokenPairReserve<X, Y>>(RESOURCE_ACCOUNT);
@@ -710,9 +1095,14 @@ module baptswap::swap {
         coin::merge(&mut metadata.team_balance_y, team_coins);
 
         // Extract rewards fee <Y> to pool
-        let rewards_pool = borrow_global_mut<TokenPairRewardsPool<X, Y>>(RESOURCE_ACCOUNT);
-        let rewards_coins = coin::extract(&mut metadata.balance_y, (amount_to_rewards as u64));
-        coin::merge(&mut rewards_pool.pool_balance_y, rewards_coins);
+        if (metadata.rewards_fee > 0) {
+            let rewards_pool = borrow_global_mut<TokenPairRewardsPool<X, Y>>(RESOURCE_ACCOUNT);
+            let rewards_coins = coin::extract(&mut metadata.balance_y, (amount_to_rewards as u64));
+
+            update_pool<X,Y>(rewards_pool, 0, coin::value(&rewards_coins));
+
+            coin::merge(&mut rewards_pool.balance_y, rewards_coins);
+        };
 
         // Update reserves
         let reserves = borrow_global_mut<TokenPairReserve<X, Y>>(RESOURCE_ACCOUNT);
@@ -763,9 +1153,14 @@ module baptswap::swap {
         coin::merge(&mut metadata.team_balance_y, team_coins);
 
         // Extract rewards fee <Y> to pool
-        let rewards_pool = borrow_global_mut<TokenPairRewardsPool<X, Y>>(RESOURCE_ACCOUNT);
-        let rewards_coins = coin::extract(&mut metadata.balance_y, (amount_to_rewards as u64));
-        coin::merge(&mut rewards_pool.pool_balance_y, rewards_coins);
+        if (metadata.rewards_fee > 0) {
+            let rewards_pool = borrow_global_mut<TokenPairRewardsPool<X, Y>>(RESOURCE_ACCOUNT);
+            let rewards_coins = coin::extract(&mut metadata.balance_y, (amount_to_rewards as u64));
+
+            update_pool<X,Y>(rewards_pool, 0, coin::value(&rewards_coins));
+
+            coin::merge(&mut rewards_pool.balance_y, rewards_coins);
+        };
 
         let reserves = borrow_global_mut<TokenPairReserve<X, Y>>(RESOURCE_ACCOUNT);
         let (balance_x, balance_y) = token_balances<X, Y>();
@@ -952,6 +1347,24 @@ module baptswap::swap {
         swap_info.fee_to = new_fee_to;
     }
 
+    public entry fun set_token_pair_owner<X, Y>(sender: &signer, owner: address) acquires SwapInfo, TokenPairMetadata {
+        let sender_addr = signer::address_of(sender);
+        let swap_info = borrow_global_mut<SwapInfo>(RESOURCE_ACCOUNT);
+        assert!(sender_addr == swap_info.admin, ERROR_NOT_ADMIN);
+
+        if (swap_utils::sort_token_type<X, Y>()) {
+            let metadata = borrow_global_mut<TokenPairMetadata<X, Y>>(RESOURCE_ACCOUNT);
+            
+            // Set new owner
+            metadata.owner = owner;
+        } else {
+            let metadata = borrow_global_mut<TokenPairMetadata<Y, X>>(RESOURCE_ACCOUNT);
+
+            // Set new owner
+            metadata.owner = owner;
+        }
+    }
+
     public entry fun set_treasury_fee<X, Y>(sender: &signer, new_treasury_fee: u128) acquires TokenPairMetadata, SwapInfo {
         assert!(new_treasury_fee <= 10, ERROR_EXCESSIVE_FEE);
         let swap_info = borrow_global_mut<SwapInfo>(RESOURCE_ACCOUNT);
@@ -979,11 +1392,15 @@ module baptswap::swap {
         // Make sure total fees do not exceed 15%
         assert!(total_fees <= 1500, ERROR_EXCESSIVE_FEE);
 
+        if (new_rewards_fee > 0) {
+            assert!(is_pool_created<X, Y>() || is_pool_created<Y,X>(), ERROR_POOL_NOT_CREATED);
+        };
+
         let sender_addr = signer::address_of(sender);
 
         if (swap_utils::sort_token_type<X, Y>()) {
             let metadata = borrow_global_mut<TokenPairMetadata<X, Y>>(RESOURCE_ACCOUNT);
-            assert!(sender_addr == metadata.creator, ERROR_NOT_CREATOR);
+            assert!(sender_addr == metadata.owner, ERROR_NOT_OWNER);
             
             // Set new fees
             metadata.liquidity_fee = new_liquidity_fee;
@@ -1003,7 +1420,7 @@ module baptswap::swap {
             );
         } else {
             let metadata = borrow_global_mut<TokenPairMetadata<Y, X>>(RESOURCE_ACCOUNT);
-            assert!(sender_addr == metadata.creator, ERROR_NOT_CREATOR);
+            assert!(sender_addr == metadata.owner, ERROR_NOT_OWNER);
 
             // Set new fees
             metadata.liquidity_fee = new_liquidity_fee;
@@ -1029,7 +1446,7 @@ module baptswap::swap {
 
         if (swap_utils::sort_token_type<X, Y>()) {
             let metadata = borrow_global_mut<TokenPairMetadata<X, Y>>(RESOURCE_ACCOUNT);
-            assert!(sender_addr == metadata.creator, ERROR_NOT_CREATOR);
+            assert!(sender_addr == metadata.owner, ERROR_NOT_OWNER);
             
             assert!(coin::value(&metadata.team_balance_x) > 0 || coin::value(&metadata.team_balance_y) > 0, ERROR_NO_FEE_WITHDRAW);
 
@@ -1046,7 +1463,7 @@ module baptswap::swap {
             };
         } else {
             let metadata = borrow_global_mut<TokenPairMetadata<Y, X>>(RESOURCE_ACCOUNT);
-            assert!(sender_addr == metadata.creator, ERROR_NOT_CREATOR);
+            assert!(sender_addr == metadata.owner, ERROR_NOT_OWNER);
 
             assert!(coin::value(&metadata.team_balance_x) > 0 || coin::value(&metadata.team_balance_y) > 0, ERROR_NO_FEE_WITHDRAW);
 
