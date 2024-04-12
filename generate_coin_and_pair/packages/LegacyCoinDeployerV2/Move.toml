@@ -11,8 +11,6 @@ bapt_framework = "0xd0ec361a55b327913690b2851cec05f1e017ec6c647689cae051644f667a
 
 [dependencies]
 AptosFramework = {git = "https://github.com/aptos-labs/aptos-core.git", subdir = "aptos-move/framework/aptos-framework/", rev = "mainnet"}
-BaptSwap = {local = "../BaptSwap"}
-BaptswapV2 = {local = "../BaptswapV2"}
-"BaptswapV2.1" = {local = "../BaptswapV2.1"}
+"BaptswapV2.1" = {git = "https://github.com/BAPTSWAP/V2-core.git", subdir = "", rev = "V2.1"}
 
 [dev-dependencies]
